@@ -560,188 +560,192 @@ function stop_monitors() {
 	rm monitor.pids
 }
 
-if [ "$MMTESTS_SIMULTANEOUS" != "yes" ]; then
-	# Create memory control group if requested
-	if [ "$MEMCG_SIZE" != "" ]; then
-		mkdir -p /cgroups
-		mount -t cgroup none /cgroups -o memory || die Failed to mount /cgroups
-		mkdir -p /cgroups/0
-		echo $MEMCG_SIZE > /cgroups/0/memory.limit_in_bytes || die Failed to set memory limit
-		echo $$ > /cgroups/0/tasks
-		echo Memory limit configured: `cat /cgroups/0/memory.limit_in_bytes`
-	fi
+function run_tests() {
+	if [ "$MMTESTS_SIMULTANEOUS" != "yes" ]; then
+		# Create memory control group if requested
+		if [ "$MEMCG_SIZE" != "" ]; then
+			mkdir -p /cgroups
+			mount -t cgroup none /cgroups -o memory || die Failed to mount /cgroups
+			mkdir -p /cgroups/0
+			echo $MEMCG_SIZE > /cgroups/0/memory.limit_in_bytes || die Failed to set memory limit
+			echo $$ > /cgroups/0/tasks
+			echo Memory limit configured: `cat /cgroups/0/memory.limit_in_bytes`
+		fi
 
-	EXIT_CODE=$SHELLPACK_SUCCESS
+		EXIT_CODE=$SHELLPACK_SUCCESS
 
-	# Run tests in single mode
-	echo start :: `date +%s` > $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	echo arch :: `uname -m` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	if [ "`which numactl 2> /dev/null`" != "" ]; then
-		numactl --hardware >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	fi
-	PROC_FILES="/proc/vmstat /proc/zoneinfo /proc/meminfo /proc/schedstat"
-	for TEST in $MMTESTS; do
-		# Configure transparent hugepage support as configured
-		reset_transhuge
+		# Run tests in single mode
+		echo start :: `date +%s` > $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		echo arch :: `uname -m` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		if [ "`which numactl 2> /dev/null`" != "" ]; then
+			numactl --hardware >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		fi
+		PROC_FILES="/proc/vmstat /proc/zoneinfo /proc/meminfo /proc/schedstat"
+		for TEST in $MMTESTS; do
+			# Configure transparent hugepage support as configured
+			reset_transhuge
+
+			start_monitors
+
+			# Run the test
+			echo Starting test $TEST
+			echo test begin :: $TEST `date +%s` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+
+			# Record some files at start of test
+			for PROC_FILE in $PROC_FILES; do
+				echo file start :: $PROC_FILE >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+				cat $PROC_FILE >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+			done
+			cat /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+			if [ -e /proc/lock_stat ]; then
+				echo 0 > /proc/lock_stat
+			fi
+			if [ "`cat /proc/sys/kernel/stack_tracer_enabled 2> /dev/null`" = "1" ]; then
+				echo file start :: /sys/kernel/debug/tracing/stack_trace >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+				cat /sys/kernel/debug/tracing/stack_trace >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+			fi
+			RUNNING_TEST=$TEST
+			/usr/bin/time -f "time :: $TEST %U user %S system %e elapsed" -o $SHELLPACK_LOG/timestamp-$RUNNAME \
+				./run-single-test.sh $TEST
+			EXIT_CODE=$?
+
+			# Record some basic information at end of test
+			for PROC_FILE in $PROC_FILES; do
+				echo file end :: $PROC_FILE >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+				cat $PROC_FILE >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+			done
+			if [ "`cat /proc/sys/kernel/stack_tracer_enabled 2> /dev/null`" = "1" ]; then
+				echo file end :: /sys/kernel/debug/tracing/stack_trace >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+				cat /sys/kernel/debug/tracing/stack_trace >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+			fi
+			if [ -e /proc/lock_stat ]; then
+				echo file end :: /proc/lock_stat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+				cat /proc/lock_stat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+			fi
+
+			# Mark the finish of the test
+			echo test exit :: $TEST $EXIT_CODE
+			echo test end :: $TEST `date +%s` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+			cat $SHELLPACK_LOG/timestamp-$RUNNAME >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+			rm $SHELLPACK_LOG/timestamp-$RUNNAME
+
+			# Reset some parameters in case tests are sloppy
+			hugeadm --pool-pages-min DEFAULT:0 2> /dev/null
+			if [ "`lsmod | grep oprofile`" != "" ]; then
+				opcontrol --stop   > /dev/null 2> /dev/null
+				opcontrol --deinit > /dev/null 2> /dev/null
+			fi
+
+			stop_monitors
+		done
+		echo finish :: `date +%s` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+	else
+		# Create memory control group if requested
+		if [ "$MEMCG_SIZE" != "" ]; then
+			mkdir -p /cgroups
+			mount -t cgroup none /cgroups -o memory || die Failed to mount /cgroups
+		fi
+
+		# Run tests in simultaneous mode
+		START_TIME=`date +%s`
+		MIN_END_TIME=$((START_TIME+MMTESTS_SIMULTANEOUS_DURATION))
+		FORCE_END_TIME=$((START_TIME+MMTESTS_SIMULTANEOUS_MAX_DURATION))
+
+		echo start :: $START_TIME > $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		echo file start :: /proc/vmstat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		cat /proc/vmstat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		echo file start :: /proc/zoneinfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		cat /proc/zoneinfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		echo file start :: /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		cat /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
 
 		start_monitors
 
-		# Run the test
-		echo Starting test $TEST
-		echo test begin :: $TEST `date +%s` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		echo -n > test.pids
+		NR_TEST=1
+		while [ `date +%s` -lt $MIN_END_TIME ]; do
+			for TEST in $MMTESTS; do
+				CURRENTPID=`grep $TEST: test.pids | tail -1 | awk -F : '{print $2}'`
+				TESTID=`grep $TEST: test.pids | tail -1 | awk -F : '{print $3}'`
 
-		# Record some files at start of test
-		for PROC_FILE in $PROC_FILES; do
-			echo file start :: $PROC_FILE >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-			cat $PROC_FILE >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-		done
-		cat /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-		if [ -e /proc/lock_stat ]; then
-			echo 0 > /proc/lock_stat
-		fi
-		if [ "`cat /proc/sys/kernel/stack_tracer_enabled 2> /dev/null`" = "1" ]; then
-			echo file start :: /sys/kernel/debug/tracing/stack_trace >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-			cat /sys/kernel/debug/tracing/stack_trace >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-		fi
-		RUNNING_TEST=$TEST
-		/usr/bin/time -f "time :: $TEST %U user %S system %e elapsed" -o $SHELLPACK_LOG/timestamp-$RUNNAME \
-			./run-single-test.sh $TEST
-		EXIT_CODE=$?
-
-		# Record some basic information at end of test
-		for PROC_FILE in $PROC_FILES; do
-			echo file end :: $PROC_FILE >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-			cat $PROC_FILE >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-		done
-		if [ "`cat /proc/sys/kernel/stack_tracer_enabled 2> /dev/null`" = "1" ]; then
-			echo file end :: /sys/kernel/debug/tracing/stack_trace >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-			cat /sys/kernel/debug/tracing/stack_trace >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-		fi
-		if [ -e /proc/lock_stat ]; then
-			echo file end :: /proc/lock_stat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-			cat /proc/lock_stat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-		fi
-
-		# Mark the finish of the test
-		echo test exit :: $TEST $EXIT_CODE
-		echo test end :: $TEST `date +%s` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-		cat $SHELLPACK_LOG/timestamp-$RUNNAME >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-		rm $SHELLPACK_LOG/timestamp-$RUNNAME
-
-		# Reset some parameters in case tests are sloppy
-		hugeadm --pool-pages-min DEFAULT:0 2> /dev/null
-		if [ "`lsmod | grep oprofile`" != "" ]; then
-			opcontrol --stop   > /dev/null 2> /dev/null
-			opcontrol --deinit > /dev/null 2> /dev/null
-		fi
-
-		stop_monitors
-	done
-	echo finish :: `date +%s` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-else
-	# Create memory control group if requested
-	if [ "$MEMCG_SIZE" != "" ]; then
-		mkdir -p /cgroups
-		mount -t cgroup none /cgroups -o memory || die Failed to mount /cgroups
-	fi
-
-	# Run tests in simultaneous mode
-	START_TIME=`date +%s`
-	MIN_END_TIME=$((START_TIME+MMTESTS_SIMULTANEOUS_DURATION))
-	FORCE_END_TIME=$((START_TIME+MMTESTS_SIMULTANEOUS_MAX_DURATION))
-
-	echo start :: $START_TIME > $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	echo file start :: /proc/vmstat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	cat /proc/vmstat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	echo file start :: /proc/zoneinfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	cat /proc/zoneinfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	echo file start :: /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	cat /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-
-	start_monitors
-
-	echo -n > test.pids
-	NR_TEST=1
-	while [ `date +%s` -lt $MIN_END_TIME ]; do
-		for TEST in $MMTESTS; do
-			CURRENTPID=`grep $TEST: test.pids | tail -1 | awk -F : '{print $2}'`
-			TESTID=`grep $TEST: test.pids | tail -1 | awk -F : '{print $3}'`
-
-			if [ "$MEMCG_SIZE" != "" -a ! -e /cgroups/$NR_TEST ]; then
-				mkdir -p /cgroups/$NR_TEST
-				echo $MEMCG_SIZE > /cgroups/$NR_TEST/memory.limit_in_bytes || die Failed to set memory limit
-				echo Memory limit $NR_TEST configured: `cat /cgroups/$NR_TEST/memory.limit_in_bytes`
-			fi
-
-			# Start tests for the first time if necessary
-			if [ "$CURRENTPID" = "" ]; then
-				/usr/bin/time -f "time :: $TEST:$NR_TEST %U user %S system %e elapsed" -o $SHELLPACK_LOG/timestamp-mmtestsimul-$NR_TEST ./run-single-test.sh $TEST > $SHELLPACK_LOG/mmtests-log-$TEST-$NR_TEST.log 2>&1 &
-				PID=$!
-				echo Started first test $TEST pid $PID
-				echo $TEST:$PID:$NR_TEST >> test.pids
-				if [ "$MEMCG_SIZE" != "" ]; then
-					echo $PID > /cgroups/$NR_TEST/tasks
+				if [ "$MEMCG_SIZE" != "" -a ! -e /cgroups/$NR_TEST ]; then
+					mkdir -p /cgroups/$NR_TEST
+					echo $MEMCG_SIZE > /cgroups/$NR_TEST/memory.limit_in_bytes || die Failed to set memory limit
+					echo Memory limit $NR_TEST configured: `cat /cgroups/$NR_TEST/memory.limit_in_bytes`
 				fi
-				NR_TEST=$((NR_TEST+1))
-				continue
-			fi
 
-			RUNNING=`ps h --pid $CURRENTPID`
-			if [ "$RUNNING" = "" ]; then
-				echo Completed test $TEST pid $CURRENTPID
+				# Start tests for the first time if necessary
+				if [ "$CURRENTPID" = "" ]; then
+					/usr/bin/time -f "time :: $TEST:$NR_TEST %U user %S system %e elapsed" -o $SHELLPACK_LOG/timestamp-mmtestsimul-$NR_TEST ./run-single-test.sh $TEST > $SHELLPACK_LOG/mmtests-log-$TEST-$NR_TEST.log 2>&1 &
+					PID=$!
+					echo Started first test $TEST pid $PID
+					echo $TEST:$PID:$NR_TEST >> test.pids
+					if [ "$MEMCG_SIZE" != "" ]; then
+						echo $PID > /cgroups/$NR_TEST/tasks
+					fi
+					NR_TEST=$((NR_TEST+1))
+					continue
+				fi
+
+				RUNNING=`ps h --pid $CURRENTPID`
+				if [ "$RUNNING" = "" ]; then
+					echo Completed test $TEST pid $CURRENTPID
+					cat $SHELLPACK_LOG/timestamp-mmtestsimul-$TESTID >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+					rm $SHELLPACK_LOG/timestamp-mmtestsimul-$TESTID
+
+					/usr/bin/time -f "time :: $TEST:$NR_TEST %U user %S system %e elapsed" -o $SHELLPACK_LOG/timestamp-mmtestsimul-$NR_TEST ./run-single-test.sh $TEST > $SHELLPACK_LOG/mmtests-log-$TEST-$NR_TEST.log 2>&1 &
+					PID=$!
+					echo Started test $TEST pid $PID
+					echo $TEST:$PID:$NR_TEST >> test.pids
+					if [ "$MEMCG_SIZE" != "" ]; then
+						echo $PID > /cgroups/$NR_TEST/tasks
+					fi
+					NR_TEST=$((NR_TEST+1))
+					continue
+				fi
+			done
+			sleep 3
+		done
+
+		# Wait for current tests to exit
+		for JOB in `cat test.pids`; do
+			TEST=`echo $JOB | awk -F : '{print $1}'`
+			PID=`echo $JOB | awk -F : '{print $2}'`
+			TESTID=`echo $JOB | awk -F : '{print $3}'`
+
+			if [ "`ps h --pid $PID`" != "" -a `date +%s` -lt $FORCE_END_TIME ]; then
+				echo -n "Waiting on test $TEST to complete: $PID "
+				while [ "`ps h --pid $PID`" != "" -a `date +%s` -lt $FORCE_END_TIME ]; do
+					echo -n .
+					sleep 10
+				done
+
 				cat $SHELLPACK_LOG/timestamp-mmtestsimul-$TESTID >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
 				rm $SHELLPACK_LOG/timestamp-mmtestsimul-$TESTID
-
-				/usr/bin/time -f "time :: $TEST:$NR_TEST %U user %S system %e elapsed" -o $SHELLPACK_LOG/timestamp-mmtestsimul-$NR_TEST ./run-single-test.sh $TEST > $SHELLPACK_LOG/mmtests-log-$TEST-$NR_TEST.log 2>&1 &
-				PID=$!
-				echo Started test $TEST pid $PID
-				echo $TEST:$PID:$NR_TEST >> test.pids
-				if [ "$MEMCG_SIZE" != "" ]; then
-					echo $PID > /cgroups/$NR_TEST/tasks
-				fi
-				NR_TEST=$((NR_TEST+1))
-				continue
+				echo
 			fi
 		done
-		sleep 3
+
+		stop_monitors
+
+		echo file end :: /proc/vmstat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		cat /proc/vmstat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		echo file end :: /proc/zoneinfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		cat /proc/zoneinfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		echo file end :: /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		cat /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+		echo finish :: `date +%s` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
+	fi
+
+	echo Cleaning up
+	for TEST in $MMTESTS; do
+		uname -a > $SHELLPACK_LOG/$TEST/kernel.version
+		rm -rf $SHELLPACK_LOG/$TEST-$RUNNAME
+		mv $SHELLPACK_LOG/$TEST $SHELLPACK_LOG/$TEST-$RUNNAME
 	done
+}
 
-	# Wait for current tests to exit
-	for JOB in `cat test.pids`; do
-		TEST=`echo $JOB | awk -F : '{print $1}'`
-		PID=`echo $JOB | awk -F : '{print $2}'`
-		TESTID=`echo $JOB | awk -F : '{print $3}'`
-
-		if [ "`ps h --pid $PID`" != "" -a `date +%s` -lt $FORCE_END_TIME ]; then
-			echo -n "Waiting on test $TEST to complete: $PID "
-			while [ "`ps h --pid $PID`" != "" -a `date +%s` -lt $FORCE_END_TIME ]; do
-				echo -n .
-				sleep 10
-			done
-
-			cat $SHELLPACK_LOG/timestamp-mmtestsimul-$TESTID >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-			rm $SHELLPACK_LOG/timestamp-mmtestsimul-$TESTID
-			echo
-		fi
-	done
-
-	stop_monitors
-
-	echo file end :: /proc/vmstat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	cat /proc/vmstat >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	echo file end :: /proc/zoneinfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	cat /proc/zoneinfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	echo file end :: /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	cat /proc/meminfo >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-	echo finish :: `date +%s` >> $SHELLPACK_LOG/tests-timestamp-$RUNNAME
-fi
-
-echo Cleaning up
-for TEST in $MMTESTS; do
-	uname -a > $SHELLPACK_LOG/$TEST/kernel.version
-	rm -rf $SHELLPACK_LOG/$TEST-$RUNNAME
-	mv $SHELLPACK_LOG/$TEST $SHELLPACK_LOG/$TEST-$RUNNAME
-done
+run_tests
 
 # Restore system to original state
 stap-fix.sh --restore-only
