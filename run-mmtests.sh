@@ -747,6 +747,35 @@ function run_tests() {
 
 run_tests
 
+function enable_tunings() {
+	echo Enabling tunings
+	for T in $TUNINGS; do
+		TUNING_SCRIPT=./tunings/tuning-$T.sh
+		$TUNING_SCRIPT --enable
+	done
+}
+
+function disable_tunings() {
+	echo Disaabling tunings
+	for T in $TUNINGS; do
+		TUNING_SCRIPT=./tunings/tuning-$T.sh
+		$TUNING_SCRIPT --disable
+	done
+}
+
+if [ "$RUN_TUNINGS" = "yes" ]; then
+	OLD_RUNNAME="$RUNNAME"
+	RUNNAME="$OLD_RUNNAME-enabled"
+
+	enable_tunings
+	run_tests
+
+	RUNNAME="$OLD_RUNNAME-disabled"
+
+	disable_tunings
+	run_tests
+fi
+
 # Restore system to original state
 stap-fix.sh --restore-only
 
