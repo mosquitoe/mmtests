@@ -53,6 +53,15 @@ function kgr_insert() {
 		echo "kGraft sys directory not touched, aborting"
 		exit 1
 	fi
+	while [ "$(cat /sys/kernel/kgraft/in_progress)" -ne 0 ]; do
+		for PROC in /proc/[0-9]*; do
+			if [ "$(cat $PROC/kgr_in_progress)" -ne 0 ]; then
+				PID=$(echo $PROC | cut -d/ -f3)
+				kill -STOP $PID
+				kill -CONT $PID
+			fi
+		done
+	done
 }
 
 function kgr_simple_enable() {
